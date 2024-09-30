@@ -17,14 +17,24 @@ class PullTest extends CatsEffectSuite {
     Stream2[IO, Int](n) ++ infSeq(n + 1)
 
   test("yoou") {
-    val p = Stream2[IO, Int](1).repeatN(100000).chunkMin(100).evalMap(x => IO(x.size))
+    val p =
+      Stream2[IO, Int](1).repeatN(100000).chunkMin(100).evalMap(x => IO(x.size))
 
     IO.println("CPS") >>
-      fs2.Stream(1).covary[IO].repeatN(100000).chunkMin(100).evalMapChunk(x => IO(x.size)).compile.drain.timed.flatMap {
+      fs2
+        .Stream(1)
+        .covary[IO]
+        .repeatN(100000)
+        .chunkMin(100)
+        .evalMapChunk(x => IO(x.size))
+        .compile
+        .drain
+        .timed
+        .flatMap { case (duration, _) =>
+          IO(println(duration))
+        } >> IO.println("closure") >> p.drain.timed.flatMap {
         case (duration, _) =>
           IO(println(duration))
-      } >> IO.println("closure") >> p.drain.timed.flatMap { case (duration, _) =>
-        IO(println(duration))
       }
   }
 
@@ -43,14 +53,20 @@ class PullTest extends CatsEffectSuite {
       Stream2
         .resource {
           Resource
-            .make(ref.getAndUpdate(_ + 1).flatTap(n => IO.println(s"opening $n")))(n => IO.println(s"closing $n"))
+            .make(
+              ref.getAndUpdate(_ + 1).flatTap(n => IO.println(s"opening $n"))
+            )(n => IO.println(s"closing $n"))
         }
         .subArc
         .repeatN(3)
         .flatMap { x =>
           Stream2
             .resource[IO, Int](
-              Resource.make(IO.println(s"sub-resource for $x"))(_ => IO.println(s"sub-closing for $x")).as(x)
+              Resource
+                .make(IO.println(s"sub-resource for $x"))(_ =>
+                  IO.println(s"sub-closing for $x")
+                )
+                .as(x)
             )
             .subArc
         }
@@ -62,7 +78,9 @@ class PullTest extends CatsEffectSuite {
 
   test("interruption") {
     IO.deferred[Unit].flatMap { d =>
-      val p = infSeq(0).evalMap(x => IO.sleep(100.millis) >> IO.println(x)).interruptWhen(d.get)
+      val p = infSeq(0)
+        .evalMap(x => IO.sleep(100.millis) >> IO.println(x))
+        .interruptWhen(d.get)
 
       (IO.sleep(500.millis) >> d.complete(()).void).background.surround {
         p.drain
@@ -87,5 +105,23 @@ class PullTest extends CatsEffectSuite {
 
   test("transfer resource") {
     IO.deferred[Resource[IO, Boolean]]
+  }
+
+  test("ttest") {
+    var n = 0
+    fs2.Stream.unit
+      .covary[IO]
+      .pull
+      .uncons1
+      .flatMap {
+        case None => fs2.Pull.done
+        case Some((hd, tl)) =>
+          fs2.Pull
+            .extendScopeTo(fs2.Stream.unit.covary[IO])
+            .evalMap(_.compile.drain)
+      }
+      .stream
+      .compile
+      .drain
   }
 }
