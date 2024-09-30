@@ -12,7 +12,9 @@ import cats.effect.kernel.CancelScope
 trait Leasable[F[_]] { self =>
   def lease: Resource[F, Boolean]
 
-  def mapK[G[_]](fk: F ~> G)(implicit F: MonadCancel[F, ?], G: MonadCancel[G, ?]): Leasable[G] =
+  def mapK[G[_]](
+      fk: F ~> G
+  )(implicit F: MonadCancel[F, ?], G: MonadCancel[G, ?]): Leasable[G] =
     new Leasable[G] {
       override def lease: Resource[G, Boolean] = self.lease.mapK(fk)
     }
@@ -41,7 +43,10 @@ object Arc {
     }
 
     def attachFinalizer(fin: F[Unit]): (State[F], Int) =
-      copy(finalizers = finalizers + (nextId -> fin), nextId = nextId + 1) -> nextId
+      copy(
+        finalizers = finalizers + (nextId -> fin),
+        nextId = nextId + 1
+      ) -> nextId
 
     def releaseFinalizer(id: Int): (State[F], Option[F[Unit]]) =
       copy(finalizers = finalizers - id) -> finalizers.get(id)
@@ -49,7 +54,8 @@ object Arc {
 
   def make[F[_]](implicit F: Target[F]): Resource[F, Arc[F]] = {
     val init = 0
-    val alloc = F.ref[Option[State[F]]](Some(State[F](Set(init), Map.empty, init + 1)))
+    val alloc =
+      F.ref[Option[State[F]]](Some(State[F](Set(init), Map.empty, init + 1)))
     Resource.eval(alloc).flatMap { ref =>
       def releaseLease(id: Int) = F.uncancelable { _ =>
         ref
@@ -75,7 +81,9 @@ object Arc {
         new Arc[F] {
           override def lease: Resource[F, Boolean] = useOne
 
-          override def attachResource[A](r: Resource[F, A]): Resource[F, Option[A]] =
+          override def attachResource[A](
+              r: Resource[F, A]
+          ): Resource[F, Option[A]] =
             Resource.uncancelable { poll =>
               poll(Resource.eval(r.allocated)).flatMap { case (a, release) =>
                 val allocate: F[Option[Int]] = ref
@@ -111,7 +119,8 @@ trait Target[F[_]] extends MonadCancelThrow[F] {
   def ref[A](a: A): F[Ref[F, A]]
 
   def pure[A](a: A): F[A] = F.pure(a)
-  def handleErrorWith[A](fa: F[A])(f: Throwable => F[A]): F[A] = F.handleErrorWith(fa)(f)
+  def handleErrorWith[A](fa: F[A])(f: Throwable => F[A]): F[A] =
+    F.handleErrorWith(fa)(f)
   def raiseError[A](e: Throwable): F[A] = F.raiseError(e)
   def flatMap[A, B](fa: F[A])(f: A => F[B]): F[B] = F.flatMap(fa)(f)
   def tailRecM[A, B](a: A)(f: A => F[Either[A, B]]): F[B] = F.tailRecM(a)(f)
@@ -123,10 +132,11 @@ trait Target[F[_]] extends MonadCancelThrow[F] {
 }
 
 object Target {
-  implicit def concurrent[F[_]](implicit F0: Concurrent[F]): Target[F] = new Target[F] {
-    val F: MonadCancelThrow[F] = F0
-    def ref[A](a: A): F[Ref[F, A]] = F0.ref(a)
-  }
+  implicit def concurrent[F[_]](implicit F0: Concurrent[F]): Target[F] =
+    new Target[F] {
+      val F: MonadCancelThrow[F] = F0
+      def ref[A](a: A): F[Ref[F, A]] = F0.ref(a)
+    }
 }
 
 final case class Context[F[_]](
@@ -142,8 +152,10 @@ final case class Unconsed[F[_], O, A](
 sealed trait Pull[+F[_], +O, +A]
 object Pull {
   sealed trait Core[F[_], O, A] extends Pull[F, O, A]
-  final case class Read[F[_]]() extends Core[F, Nothing, (Target[F], Context[F])]
-  final case class Write[F[_], O, A](fa: F[Unconsed[F, O, A]]) extends Core[F, O, A]
+  final case class Read[F[_]]()
+      extends Core[F, Nothing, (Target[F], Context[F])]
+  final case class Write[F[_], O, A](fa: F[Unconsed[F, O, A]])
+      extends Core[F, O, A]
   final case class FlatMap[F[_], O, A, B](
       fa: Pull[F, O, A],
       f: A => Pull[F, O, B]
@@ -159,7 +171,9 @@ object Pull {
   def write[F[_], O, A](fa: F[Unconsed[F, O, A]]): Pull[F, O, A] =
     Write(fa)
 
-  def flatMap[F[_], O, A, B](fa: Pull[F, O, A])(f: A => Pull[F, O, B]): Pull[F, O, B] =
+  def flatMap[F[_], O, A, B](fa: Pull[F, O, A])(
+      f: A => Pull[F, O, B]
+  ): Pull[F, O, B] =
     FlatMap(fa, f)
 
   def run[F[_], O, A](
@@ -179,7 +193,9 @@ object Pull {
         run(uc.p, ctx).map(uc => Unconsed(ctx, Left(uc.cont.toOption)))
     }
 
-  def stateful[F[_], O, A](f: (Target[F], Context[F]) => F[Unconsed[F, O, A]]): Pull[F, O, A] =
+  def stateful[F[_], O, A](
+      f: (Target[F], Context[F]) => F[Unconsed[F, O, A]]
+  ): Pull[F, O, A] =
     read[F].flatMap { case (tc, ctx) => write(f(tc, ctx)) }
 
   def pure[F[_], A](a: A): Pull[F, Nothing, A] =
@@ -189,7 +205,9 @@ object Pull {
     stateful[F, Nothing, Target[F]]((F, ctx) => F.pure(Unconsed(ctx, Left(F))))
 
   def output[F[_], O](value: fs2.Chunk[O]): Pull[F, O, Unit] =
-    stateful[F, O, Unit]((F, ctx) => F.pure(Unconsed(ctx, Right(value -> done))))
+    stateful[F, O, Unit]((F, ctx) =>
+      F.pure(Unconsed(ctx, Right(value -> done)))
+    )
 
   def output1[F[_], O](value: O): Pull[F, O, Unit] =
     output(fs2.Chunk.singleton(value))
@@ -199,21 +217,30 @@ object Pull {
 
   def acquire[F[_], A](r: Resource[F, A]): Pull[F, Nothing, Option[A]] =
     stateful[F, Nothing, Option[A]] { (F, ctx) =>
-      F.map(ctx.arc.attachResource(r).allocated(F)) { case (a, _) => Unconsed(ctx, Left(a)) }
+      F.map(ctx.arc.attachResource(r).allocated(F)) { case (a, _) =>
+        Unconsed(ctx, Left(a))
+      }
     }
 
   def replaceContext[F[_]](ctx: Context[F]): Pull[F, Nothing, Unit] =
     stateful[F, Nothing, Unit]((F, _) => F.pure(Unconsed(ctx, leftUnit)))
 
   def getContext[F[_]]: Pull[F, Nothing, Context[F]] =
-    stateful[F, Nothing, Context[F]]((F, ctx) => F.pure(Unconsed(ctx, Left(ctx))))
+    stateful[F, Nothing, Context[F]]((F, ctx) =>
+      F.pure(Unconsed(ctx, Left(ctx)))
+    )
 
-  def unStep[F[_], O, A](p: Pull[F, O, A]): Pull[F, Nothing, F[Either[A, (Chunk[O], Pull[F, O, A])]]] =
+  def unStep[F[_], O, A](
+      p: Pull[F, O, A]
+  ): Pull[F, Nothing, F[Either[A, (Chunk[O], Pull[F, O, A])]]] =
     stateful { (F: Target[F], ctx: Context[F]) =>
       F.pure {
-        val fa: F[Either[A, (Chunk[O], Pull[F, O, A])]] = F.map(run(p, ctx)(F)) { case Unconsed(ctx, e) =>
-          e.map { case (hd, tl) => hd -> stateful[F, O, A]((F, _) => run(tl, ctx)(F)) }
-        }
+        val fa: F[Either[A, (Chunk[O], Pull[F, O, A])]] =
+          F.map(run(p, ctx)(F)) { case Unconsed(ctx, e) =>
+            e.map { case (hd, tl) =>
+              hd -> stateful[F, O, A]((F, _) => run(tl, ctx)(F))
+            }
+          }
         Unconsed(ctx, Left(fa))
       }
     }
@@ -227,12 +254,14 @@ object Pull {
       implicit val F = f0
       write {
         shift(ctx.arc, fk).allocated.flatMap { case (child, release) =>
-          val newParents: List[Leasable[G]] = (ctx.arc :: ctx.parents).map(_.mapK(gk))
+          val newParents: List[Leasable[G]] =
+            (ctx.arc :: ctx.parents).map(_.mapK(gk))
           fk(run(pull, Context(child, newParents))).flatMap { out =>
             out.cont match {
               case Left(a) => release.as(Unconsed[F, O, A](ctx, Left(a)))
               case Right((hd, tl)) =>
-                val tl2 = translate(tl, fk, gk) <* eval(release) <* replaceContext(ctx)
+                val tl2 =
+                  translate(tl, fk, gk) <* eval(release) <* replaceContext(ctx)
                 F.pure(Unconsed[F, O, A](ctx, Right(hd -> tl2)))
             }
           }
@@ -260,16 +289,18 @@ object Pull {
       root: Arc[F],
       init: B
   )(fold: (B, fs2.Chunk[O]) => B)(implicit F: Target[F]): F[(B, A)] =
-    (init, Unconsed(Context(root, Nil), Right(fs2.Chunk.empty -> p))).tailRecM[F, (B, A)] {
-      case (z, Unconsed(_, Left(a))) => F.pure(Right((z, a)))
-      case (z, Unconsed(ctx, Right((hd, tl)))) =>
-        val z2 = if (hd.nonEmpty) fold(z, hd) else z
-        run(tl, ctx)(F).map(x => Left(z2 -> x))
-    }
+    (init, Unconsed(Context(root, Nil), Right(fs2.Chunk.empty -> p)))
+      .tailRecM[F, (B, A)] {
+        case (z, Unconsed(_, Left(a))) => F.pure(Right((z, a)))
+        case (z, Unconsed(ctx, Right((hd, tl)))) =>
+          val z2 = if (hd.nonEmpty) fold(z, hd) else z
+          run(tl, ctx)(F).map(x => Left(z2 -> x))
+      }
 
   implicit def monad[F[_], O]: Monad[Pull[F, O, *]] = new Monad[Pull[F, O, *]] {
     def pure[A](a: A): Pull[F, O, A] = Pull.pure(a)
-    def flatMap[A, B](fa: Pull[F, O, A])(f: A => Pull[F, O, B]): Pull[F, O, B] = Pull.flatMap(fa)(f)
+    def flatMap[A, B](fa: Pull[F, O, A])(f: A => Pull[F, O, B]): Pull[F, O, B] =
+      Pull.flatMap(fa)(f)
     def tailRecM[A, B](a: A)(f: A => Pull[F, O, Either[A, B]]): Pull[F, O, B] =
       f(a).flatMap {
         case Left(a)  => tailRecM(a)(f)
@@ -278,10 +309,14 @@ object Pull {
   }
 
   implicit class PullOps[+F[_], +O, +A](private val self: Pull[F, O, A]) {
-    def flatMap[F2[x] >: F[x], O2 >: O, B](f: A => Pull[F2, O2, B]): Pull[F2, O2, B] =
+    def flatMap[F2[x] >: F[x], O2 >: O, B](
+        f: A => Pull[F2, O2, B]
+    ): Pull[F2, O2, B] =
       Pull.flatMap[F2, O2, A, B](self)(f)
 
-    def >>[F2[x] >: F[x], O2 >: O, B](that: => Pull[F2, O2, B]): Pull[F2, O2, B] = flatMap(_ => that)
+    def >>[F2[x] >: F[x], O2 >: O, B](
+        that: => Pull[F2, O2, B]
+    ): Pull[F2, O2, B] = flatMap(_ => that)
 
     def map[B](f: A => B): Pull[F, O, B] = flatMap(a => pure(f(a)))
 
@@ -291,13 +326,15 @@ object Pull {
     def leaseAll[F2[x] >: F[x]]: Pull[F2, Nothing, Resource[F2, Boolean]] =
       Pull.leaseAll[F2]
 
-    def transferAll[F2[x] >: F[x], O2 >: O, A2 >: A]: Pull[F2, Nothing, Pull[F2, O, Option[A]]] =
+    def transferAll[F2[x] >: F[x], O2 >: O, A2 >: A]
+        : Pull[F2, Nothing, Pull[F2, O, Option[A]]] =
       leaseAll[F2].map(acquire(_).flatMap {
         case None | Some(false) => pure(None)
         case Some(true)         => self.map(Some(_))
       })
 
-    def transferLease[F2[x] >: F[x], O2 >: O, A2 >: A]: Pull[F2, O, Pull[F2, Nothing, Option[A]]] =
+    def transferLease[F2[x] >: F[x], O2 >: O, A2 >: A]
+        : Pull[F2, O, Pull[F2, Nothing, Option[A]]] =
       self.flatMap { a =>
         leaseAll[F2].map(acquire(_).map {
           case None | Some(false) => None
@@ -305,61 +342,65 @@ object Pull {
         })
       }
 
-    def unStep[F2[x] >: F[x], O2 >: O, A2 >: A]: Pull[F2, Nothing, F2[Either[A2, (Chunk[O2], Pull[F2, O2, A2])]]] =
+    def unStep[F2[x] >: F[x], O2 >: O, A2 >: A]
+        : Pull[F2, Nothing, F2[Either[A2, (Chunk[O2], Pull[F2, O2, A2])]]] =
       Pull.unStep[F2, O2, A2](self)
   }
 
   implicit class PullUnitOps[F[_], O](private val self: Pull[F, O, Unit]) {
     def uncons: Pull[F, Nothing, Option[(fs2.Chunk[O], Pull[F, O, Unit])]] =
       Uncons(self)
+
+    def stream: Stream[F, O] = new Stream(self)
   }
 
-  class Stream2[F[_], O](val pull: Pull[F, O, Unit]) {
-    def map[O2](f: O => O2): Stream2[F, O2] =
-      new Stream2(
+  class Stream[F[_], O](val pull: Pull[F, O, Unit]) {
+    def map[O2](f: O => O2): Stream[F, O2] =
+      new Stream(
         pull.uncons.flatMap {
           case None => done
           case Some((hd, tl)) =>
-            output(hd.map(f)) >> new Stream2(tl).map(f).pull
+            output(hd.map(f)) >> new Stream(tl).map(f).pull
         }
       )
 
-    def flatMap[O2](f: O => Stream2[F, O2]): Stream2[F, O2] =
-      new Stream2(
+    def flatMap[O2](f: O => Stream[F, O2]): Stream[F, O2] =
+      new Stream(
         pull.uncons.flatMap {
           case None => done
           case Some((hd, tl)) =>
             def go(xs: List[O]): Pull[F, O2, Unit] =
               xs match {
-                case Nil     => new Stream2(tl).flatMap(f).pull
+                case Nil     => new Stream(tl).flatMap(f).pull
                 case x :: xs => f(x).pull >> go(xs)
               }
             go(hd.toList)
         }
       )
 
-    def ++(that: => Stream2[F, O]): Stream2[F, O] =
-      new Stream2(pull.flatMap(_ => that.pull))
+    def ++(that: => Stream[F, O]): Stream[F, O] =
+      new Stream(pull.flatMap(_ => that.pull))
 
-    def repeat: Stream2[F, O] =
+    def repeat: Stream[F, O] =
       this ++ repeat
 
-    def repeatN(n: Int): Stream2[F, O] =
-      if (n <= 0) Stream2.empty
+    def repeatN(n: Int): Stream[F, O] =
+      if (n <= 0) Stream.empty
       else this ++ repeatN(n - 1)
 
-    def evalMap[A](f: O => F[A]): Stream2[F, A] =
-      new Stream2(
+    def evalMap[A](f: O => F[A]): Stream[F, A] =
+      new Stream(
         getTarget[F].flatMap { implicit F =>
           pull.uncons.flatMap {
             case None => done
             case Some((hd, tl)) =>
-              eval(hd.traverse(f)).flatMap(output[F, A](_)) >> new Stream2(tl).evalMap(f).pull
+              eval(hd.traverse(f))
+                .flatMap(output[F, A](_)) >> new Stream(tl).evalMap(f).pull
           }
         }
       )
 
-    def chunkMin(n: Int): Stream2[F, fs2.Chunk[O]] = {
+    def chunkMin(n: Int): Stream[F, fs2.Chunk[O]] = {
       def go(
           accum: Chunk[O],
           p: Pull[F, O, Unit]
@@ -368,15 +409,16 @@ object Pull {
           case None => Pull.output1(accum)
           case Some((hd, tl)) =>
             val newAccum = accum ++ hd
-            if (newAccum.size >= n) Pull.output1(newAccum) >> go(Chunk.empty, tl)
+            if (newAccum.size >= n)
+              Pull.output1(newAccum) >> go(Chunk.empty, tl)
             else go(newAccum, tl)
         }
 
-      new Stream2(go(Chunk.empty, pull))
+      new Stream(go(Chunk.empty, pull))
     }
 
-    def handleErrorWith(f: Throwable => Stream2[F, O]): Stream2[F, O] =
-      new Stream2(
+    def handleErrorWith(f: Throwable => Stream[F, O]): Stream[F, O] =
+      new Stream(
         stateful[F, O, Unit] { (F, ctx) =>
           F.flatMap(F.attempt(run(pull, ctx)(F))) {
             case Left(e) => run(f(e).pull, ctx)(F)
@@ -384,31 +426,38 @@ object Pull {
               uc.cont match {
                 case Left(a) => F.pure(Unconsed(uc.ctx, Left(a)))
                 case Right((hd, tl)) =>
-                  F.pure(Unconsed(uc.ctx, Right(hd -> new Stream2(tl).handleErrorWith(f).pull)))
+                  F.pure(
+                    Unconsed(
+                      uc.ctx,
+                      Right(hd -> new Stream(tl).handleErrorWith(f).pull)
+                    )
+                  )
               }
           }
         }
       )
 
-    def subArc: Stream2[F, O] =
-      new Stream2({
+    def subArc: Stream[F, O] =
+      new Stream({
         getTarget[F].flatMap { implicit F =>
           translate(pull, FunctionK.id[F], FunctionK.id[F])
         }
       })
 
-    def interruptWhen(p: F[Unit])(implicit F: Async[F]): Stream2[F, O] =
-      new Stream2({
+    def interruptWhen(p: F[Unit])(implicit F: Async[F]): Stream[F, O] =
+      new Stream({
         unStep(pull).flatMap { fa =>
           eval(p.race(fa).map(_.flatten.toOption)).flatMap {
             case None => done
             case Some((hd, tl)) =>
-              output(hd) >> new Stream2(tl).interruptWhen(p).pull
+              output(hd) >> new Stream(tl).interruptWhen(p).pull
           }
         }
       }).subArc
 
-    def foldMap[B](init: B)(f: (B, Chunk[O]) => B)(implicit F: Target[F]): F[B] =
+    def foldMap[B](
+        init: B
+    )(f: (B, Chunk[O]) => B)(implicit F: Target[F]): F[B] =
       Arc.make[F].use { arc =>
         compile(pull, arc, init)(f).map(_._1)
       }
@@ -417,22 +466,29 @@ object Pull {
       foldMap(())((_, _) => ())
   }
 
-  object Stream2 {
-    def apply[F[_], O](a: O): Stream2[F, O] = new Stream2(output1(a))
+  object Stream {
+    def apply[F[_], O](a: O): Stream[F, O] = new Stream(output1(a))
 
-    def chunk[F[_], O](chunk: Chunk[O]): Stream2[F, O] = new Stream2(Pull.output(chunk))
+    def chunk[F[_], O](chunk: Chunk[O]): Stream[F, O] = new Stream(
+      Pull.output(chunk)
+    )
 
-    def empty[F[_], O]: Stream2[F, O] = new Stream2(pure(()))
+    def empty[F[_], O]: Stream[F, O] = new Stream(pure(()))
 
-    def eval[F[_], A](fa: F[A]): Stream2[F, A] = new Stream2(Pull.eval(fa).flatMap(output1))
+    def eval[F[_], A](fa: F[A]): Stream[F, A] = new Stream(
+      Pull.eval(fa).flatMap(output1)
+    )
 
-    def resource[F[_], A](r: Resource[F, A]): Stream2[F, A] =
-      new Stream2(
+    def resource[F[_], A](r: Resource[F, A]): Stream[F, A] =
+      new Stream(
         acquire(r)
           .flatMap { o =>
             getTarget[F].flatMap { implicit F =>
               o match {
-                case None    => Pull.eval[F, Nothing](F.raiseError(new Exception("arc closed")))
+                case None =>
+                  Pull.eval[F, Nothing](
+                    F.raiseError(new Exception("arc closed"))
+                  )
                 case Some(x) => output1(x)
               }
             }

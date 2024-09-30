@@ -9,16 +9,17 @@ import fs2.Chunk
 import cats.arrow.FunctionK
 import cats.effect.kernel.CancelScope
 import munit.CatsEffectSuite
+import cats.effect.std.Supervisor
 
 class PullTest extends CatsEffectSuite {
   import Pull._
 
-  def infSeq(n: Int): Stream2[IO, Int] =
-    Stream2[IO, Int](n) ++ infSeq(n + 1)
+  def infSeq(n: Int): Stream[IO, Int] =
+    Stream[IO, Int](n) ++ infSeq(n + 1)
 
   test("yoou") {
     val p =
-      Stream2[IO, Int](1).repeatN(100000).chunkMin(100).evalMap(x => IO(x.size))
+      Stream[IO, Int](1).repeatN(100000).chunkMin(100).evalMap(x => IO(x.size))
 
     IO.println("CPS") >>
       fs2
@@ -39,18 +40,18 @@ class PullTest extends CatsEffectSuite {
   }
 
   test("err") {
-    val p = Stream2[IO, Int](1)
+    val p = Stream[IO, Int](1)
       .repeatN(3)
       .evalMap(i => IO.raiseError[Unit](new Exception("boom")))
       .map(_ => Option.empty[Throwable])
-      .handleErrorWith(e => Stream2[IO, Option[Throwable]](Some(e)))
+      .handleErrorWith(e => Stream[IO, Option[Throwable]](Some(e)))
 
     p.foldMap(Chunk.empty[Option[Throwable]])((z, c) => z ++ c).map(println)
   }
 
   test("resource") {
-    val p = Stream2.eval(IO.ref(0)).flatMap { ref =>
-      Stream2
+    val p = Stream.eval(IO.ref(0)).flatMap { ref =>
+      Stream
         .resource {
           Resource
             .make(
@@ -60,7 +61,7 @@ class PullTest extends CatsEffectSuite {
         .subArc
         .repeatN(3)
         .flatMap { x =>
-          Stream2
+          Stream
             .resource[IO, Int](
               Resource
                 .make(IO.println(s"sub-resource for $x"))(_ =>
@@ -90,12 +91,12 @@ class PullTest extends CatsEffectSuite {
 
   test("resource with error") {
     IO.ref(0).flatMap { ref =>
-      Stream2
+      Stream
         .resource(Resource.make(ref.update(_ + 1))(_ => ref.update(_ - 1)))
         .evalMap { _ =>
           IO.raiseError[Unit](new Exception("boom"))
         }
-        .handleErrorWith(e => Stream2.eval(IO.println(e)))
+        .handleErrorWith(e => Stream.eval(IO.println(e)))
         .drain
         .flatMap { _ =>
           ref.get.assertEquals(0)
@@ -103,25 +104,74 @@ class PullTest extends CatsEffectSuite {
     }
   }
 
+  def refRes = IO
+    .ref(0)
+    .map(ref => ref -> Resource.make(ref.update(_ + 1))(_ => ref.update(_ - 1)))
+
   test("transfer resource") {
-    IO.deferred[Resource[IO, Boolean]]
+    Supervisor[IO].use { sup =>
+      IO.deferred[
+        (
+            Resource[IO, Boolean],
+            IO[Unit]
+        )
+      ].flatMap { d =>
+        refRes.flatMap { case (ref, res) =>
+          val bg =
+            Stream
+              .resource(res)
+              .pull
+              .uncons
+              .flatMap {
+                case None => Pull.done
+                case Some((_, tl)) =>
+                  for {
+                    canProceed <- Pull.eval(IO.deferred[Unit])
+                    lease <- tl.leaseAll
+                    _ <- Pull
+                      .eval(d.complete((lease, canProceed.complete(()).void)))
+                    _ <- Pull.eval(canProceed.get)
+                    o <- tl
+                  } yield o
+              }
+              .stream
+              .drain
+
+          sup.supervise(bg).flatMap { fib =>
+            d.get.flatMap { case (res, canStop) =>
+              res.use { b =>
+                IO(assert(b)) >>
+                  ref.get.assertEquals(1) >>
+                  canStop >>
+                  fib.joinWithNever >>
+                  // we still hold the resource
+                  ref.get.assertEquals(1)
+              } >> ref.get.assertEquals(0) >> res.use { b =>
+                IO(assert(!b)) >> ref.get.assertEquals(0)
+              }
+            }
+          }
+        }
+      }
+    }
   }
 
-  test("ttest") {
-    var n = 0
-    fs2.Stream.unit
-      .covary[IO]
-      .pull
-      .uncons1
-      .flatMap {
-        case None => fs2.Pull.done
-        case Some((hd, tl)) =>
-          fs2.Pull
-            .extendScopeTo(fs2.Stream.unit.covary[IO])
-            .evalMap(_.compile.drain)
-      }
-      .stream
-      .compile
-      .drain
+  test("pull is stateless") {
+    refRes.flatMap { case (ref, res) =>
+      Stream
+        .resource(res)
+        .subArc
+        .repeatN(3)
+        .pull
+        .uncons
+        .flatMap {
+          case None          => Pull.done
+          case Some((_, tl)) =>
+            // one for this pull and the tail pull
+            eval(tl.stream.evalMap(_ => ref.get.assertEquals(1)).drain)
+        }
+        .stream
+        .drain
+    }
   }
 }
