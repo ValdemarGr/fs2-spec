@@ -152,6 +152,22 @@ final case class Unconsed[F[_], O, A](
 sealed trait Pull[+F[_], +O, +A]
 object Pull {
   sealed trait Core[F[_], O, A] extends Pull[F, O, A]
+
+  trait Container[F[_]] {
+    type H[A]
+    def lift: F ~> H
+    def unsafe: H ~> F
+    def target: Target[H]
+    def context: Context[H]
+    def write[O, A](fa: H[Unconsed[F, O, A]]): Pull[H, O, A]
+  }
+  final case class Read0[F[_]]() extends Core[F, Nothing, Container[F]]
+  final case class Translate[F[_], G[_], O, A](
+      pull: Pull[G, O, A],
+      fk: G ~> F,
+      gk: F ~> G
+  ) extends Core[F, O, A]
+
   final case class Read[F[_]]()
       extends Core[F, Nothing, (Target[F], Context[F])]
   final case class Write[F[_], O, A](fa: F[Unconsed[F, O, A]])
@@ -175,6 +191,40 @@ object Pull {
       f: A => Pull[F, O, B]
   ): Pull[F, O, B] =
     FlatMap(fa, f)
+
+  def run0[F[_], G[_], O, A](
+      p: Pull[G, O, A],
+      ctx: Context[F],
+      fk: G ~> F,
+      gk: F ~> G
+  )(implicit F: Target[F]): F[Unconsed[F, O, A]] =
+    p match {
+      case _: Read[G] => F.pure(null)
+      case r0: Read0[G] =>
+        F.pure(
+          Unconsed(
+            ctx,
+            Left(new Container[G] {
+              type H[A] = F[A]
+              val lift = fk
+              val unsafe = gk
+              val target = F
+              val context = ctx
+              def write[O, A](fa: F[Unconsed[G,O,A]]): Pull[F, O, A] = 
+                fa.map(uc => null)
+            })
+          )
+        )
+      // case w: Write[G, O, A] => fk(w.fa)
+      case fm: FlatMap[F, O, a, A] =>
+        F.unit >> run(fm.fa, ctx).flatMap {
+          case Unconsed(ctx, Left(a)) => run(fm.f(a), ctx)
+          case Unconsed(ctx, Right((hd, tl))) =>
+            F.pure(Unconsed(ctx, Right(hd -> flatMap(tl)(fm.f))))
+        }
+      case uc: Uncons[F, o, a] =>
+        run(uc.p, ctx).map(uc => Unconsed(ctx, Left(uc.cont.toOption)))
+    }
 
   def run[F[_], O, A](
       p: Pull[F, O, A],

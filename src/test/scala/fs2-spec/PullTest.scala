@@ -174,4 +174,27 @@ class PullTest extends CatsEffectSuite {
         .drain
     }
   }
+
+  test("oo") {
+    sealed trait Lang[+F[_]]
+    trait LangImpl[F[_]] extends Lang[F] {
+      def extract[A](a: F[A]): Int
+    }
+
+    trait Pure[A] {
+      def value: A
+    }
+    case class PureImpl[A](value: A, constant: Int = 5) extends Pure[A]
+
+    val l: Lang[PureImpl] = new LangImpl[PureImpl] {
+      def extract[A](a: PureImpl[A]): Int = a.constant
+    }
+
+    def getImpl[F[_]](l: Lang[F]): LangImpl[F] = l match {
+      case l: LangImpl[F] => l
+    }
+
+    val refine = l: Lang[Pure]
+    getImpl(refine).extract(new Pure[String] { val value = "hello" })
+  }
 }
