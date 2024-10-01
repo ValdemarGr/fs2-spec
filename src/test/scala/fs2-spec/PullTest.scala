@@ -175,7 +175,7 @@ class PullTest extends CatsEffectSuite {
     }
   }
 
-  test("oo") {
+  test("covariant higher kinds are unsound in scala 2".ignore) {
     sealed trait Lang[+F[_]]
     trait LangImpl[F[_]] extends Lang[F] {
       def extract[A](a: F[A]): Int
