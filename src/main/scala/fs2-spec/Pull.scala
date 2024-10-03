@@ -131,6 +131,8 @@ trait Target[F[_]] extends MonadCancelThrow[F] {
   def rootCancelScope: CancelScope = F.rootCancelScope
 
   def concurrent: Option[Concurrent[F]] = None
+
+  def defer[A](fa: => F[A]): F[A]
 }
 
 object Target {
@@ -138,6 +140,10 @@ object Target {
     new Target[F] {
       val F: MonadCancelThrow[F] = F0
       def ref[A](a: A): F[Ref[F, A]] = F0.ref(a)
+      def defer[A](fa: => F[A]): F[A] = F0 match {
+        case s: Sync[F] => s.defer(fa)
+        case _          => ???
+      }
     }
 }
 
@@ -175,7 +181,36 @@ object Test {
     case pi: PullImpl[F, O, A] => pi.run(generalize, unsafeSpecialize, ctx)
   }
 
-  implicit def monadForPull[F[_], O]: Monad[Pull[F, O, *]] = ???
+  def fold[F[_], O, A, B](
+      p: Pull[F, O, A],
+      init: B
+  )(fold: (B, Chunk[O]) => B)(implicit F: Target[F]) =
+    Arc.make[F].use { arc =>
+      (init, Ret(Context(arc, Nil), Right(fs2.Chunk.empty -> p)))
+        .tailRecM[F, (B, A)] {
+          case (z, Ret(ctx, Left(a))) => F.pure(Right((z, a)))
+          case (z, Ret(ctx, Right((hd, tl)))) =>
+            val z2 = if (hd.nonEmpty) fold(z, hd) else z
+            perform(tl, FunctionK.id[F], FunctionK.id[F], ctx)
+              .map(x => Left(z2 -> x))
+        }
+    }
+
+  implicit def monadForPull[F[_], O]: Monad[Pull[F, O, *]] =
+    new Monad[Pull[F, O, *]] {
+      def pure[A](a: A): Pull[F, O, A] = pure(a)
+      def flatMap[A, B](fa: Pull[F, O, A])(
+          f: A => Pull[F, O, B]
+      ): Pull[F, O, B] =
+        Test.flatMap(fa)(f)
+      def tailRecM[A, B](
+          a: A
+      )(f: A => Pull[F, O, Either[A, B]]): Pull[F, O, B] =
+        Test.flatMap(f(a)) {
+          case Left(a)  => tailRecM(a)(f)
+          case Right(b) => Test.pure(b)
+        }
+    }
 
   def flatMap[F[_], O, A, B](
       fa: Pull[F, O, A]
@@ -186,12 +221,14 @@ object Test {
           unsafeSpecialize: G ~> F,
           ctx: Context[G]
       )(implicit G: Target[G]): G[Ret[F, G, O, B]] =
-        perform(fa, generalize, unsafeSpecialize, ctx).flatMap { r =>
-          r.cont match {
-            case Left(a) =>
-              perform(f(a), generalize, unsafeSpecialize, r.context)
-            case Right((hd, tl)) =>
-              G.pure(Ret(r.context, Right(hd -> flatMap(tl)(f))))
+        G.defer {
+          perform(fa, generalize, unsafeSpecialize, ctx).flatMap { r =>
+            r.cont match {
+              case Left(a) =>
+                perform(f(a), generalize, unsafeSpecialize, r.context)
+              case Right((hd, tl)) =>
+                G.pure(Ret(r.context, Right(hd -> flatMap(tl)(f))))
+            }
           }
         }
     }
@@ -204,6 +241,52 @@ object Test {
           ctx: Context[G]
       )(implicit G: Target[G]): G[Ret[F, G, Nothing, A]] =
         G.pure(Ret(ctx, Left(a)))
+    }
+
+  val done: Pull[Nothing, Nothing, Unit] = pure(())
+
+  def output[F[_], O](chunk: Chunk[O]): Pull[F, O, Unit] =
+    new PullImpl[F, O, Unit] {
+      def run[G[_]](
+          generalize: F ~> G,
+          unsafeSpecialize: G ~> F,
+          ctx: Context[G]
+      )(implicit G: Target[G]): G[Ret[F, G, O, Unit]] =
+        G.pure(Ret(ctx, Right(chunk -> done)))
+    }
+
+  def repeatN[F[_], O](p: Pull[F, O, Unit], n: Int): Pull[F, O, Unit] =
+    if (n <= 0) done
+    else flatMap(p)(_ => repeatN(p, n - 1))
+
+  def chunkMin[F[_], O](
+      p: Pull[F, O, Unit],
+      n: Int
+  ): Pull[F, Chunk[O], Unit] = {
+    def go(
+        accum: Chunk[O],
+        p: Pull[F, O, Unit]
+    ): Pull[F, Chunk[O], Unit] =
+      flatMap(uncons(p)) {
+        case None => output(fs2.Chunk.singleton(accum))
+        case Some((hd, tl)) =>
+          val newAccum = accum ++ hd
+          if (newAccum.size >= n)
+            flatMap(output(fs2.Chunk.singleton(newAccum)))(_ =>
+              go(Chunk.empty, tl)
+            )
+          else go(newAccum, tl)
+      }
+    go(Chunk.empty, p)
+  }
+
+  def evalMap[F[_]: Applicative, O, O2](
+      p: Pull[F, O, Unit]
+  )(f: O => F[O2]): Pull[F, O2, Unit] =
+    flatMap(uncons(p)) {
+      case None => done
+      case Some((hd, tl)) =>
+        flatMap(flatMap(eval(hd.traverse(f)))(output))(_ => evalMap(tl)(f))
     }
 
   def interruptWhen_[F[_], O, A](
@@ -272,6 +355,33 @@ object Test {
           .allocated
           .map { case (a, _) => Ret(ctx, Left(a)) }
     }
+
+  def eval[F[_], A](fa: F[A]): Pull[F, Nothing, A] =
+    new PullImpl[F, Nothing, A] {
+      def run[G[_]](
+          generalize: F ~> G,
+          unsafeSpecialize: G ~> F,
+          ctx: Context[G]
+      )(implicit G: Target[G]): G[Ret[F, G, Nothing, A]] =
+        generalize(fa).map(a => Ret(ctx, Left(a)))
+    }
+
+  def uncons[F[_], O, A](
+      p: Pull[F, O, A]
+  ): Pull[F, Nothing, Option[(Chunk[O], Pull[F, O, A])]] =
+    new PullImpl[F, Nothing, Option[(Chunk[O], Pull[F, O, A])]] {
+      def run[G[_]](
+          generalize: F ~> G,
+          unsafeSpecialize: G ~> F,
+          ctx: Context[G]
+      )(implicit
+          G: Target[G]
+      ): G[Ret[F, G, Nothing, Option[(Chunk[O], Pull[F, O, A])]]] =
+        perform(p, generalize, unsafeSpecialize, ctx).map {
+          case Ret(ctx, Left(a))         => Ret(ctx, Left(None))
+          case Ret(ctx, Right((hd, tl))) => Ret(ctx, Left(Some(hd -> tl)))
+        }
+    }
 }
 
 final case class Unconsed[F[_], O, A](
@@ -281,20 +391,13 @@ final case class Unconsed[F[_], O, A](
 
 sealed trait Pull[+F[_], +O, +A]
 object Pull {
-  trait Str[F[_], O, A]
-  object Str {
-    implicit def evidence[F[_], O, A]: Str[fs2.Pure, O, A] <:< Str[F, O, A] = ???
-  }
-
-  def doThing(p: Str[cats.effect.IO, String, Unit]) = p
-  doThing(new Str[fs2.Pure, String, Unit] {})
-
   sealed trait Core[F[_], O, A] extends Pull[F, O, A]
 
-  final case class Read[F[_]]()
-      extends Core[F, Nothing, (Target[F], Context[F])]
-  final case class Write[F[_], O, A](fa: F[Unconsed[F, O, A]])
-      extends Core[F, O, A]
+  final case class Read[F[_]](
+  ) extends Core[F, Nothing, (Target[F], Context[F])]
+  final case class Write[F[_], O, A](
+      fa: F[Unconsed[F, O, A]]
+  ) extends Core[F, O, A]
   final case class FlatMap[F[_], O, A, B](
       fa: Pull[F, O, A],
       f: A => Pull[F, O, B]
